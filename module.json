@@ -1,0 +1,69 @@
+{
+  "api_version": 1,
+  "id": "genera",
+  "name": "Genera",
+  "abbrev": "GEN",
+  "version": "0.1.0",
+  "builtin": false,
+  "description": "Generative note and chord sequencer",
+  "author": "Vincent Fillion",
+  "license": "MIT",
+  "capabilities": {
+    "chainable": true,
+    "component_type": "midi_fx",
+    "ui_hierarchy": {
+      "levels": {
+        "root": {
+          "name": "Genera",
+          "knobs": ["root", "scale", "steps", "capture", "evolve", "stutter", "octaves", "chord"],
+          "params": [
+            { "label": "Genera", "level": "genera" },
+            { "label": "Sync", "level": "sync" }
+          ]
+        },
+        "genera": {
+          "name": "Genera",
+          "knobs": ["root", "scale", "steps", "capture", "evolve", "stutter", "octaves", "chord"],
+          "params": [
+            { "key": "root", "label": "Root", "type": "enum", "options": ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"], "default": "C" },
+            { "key": "scale", "label": "Scale", "type": "enum", "options": ["Major","Minor","Dorian","Phrygian","Lydian","Mixolydian","Aeolian","Locrian","Harm Min","Melod Min","Penta Maj","Penta Min","Blues","Whole Tone","Diminished","Augmented","Chromatic","Hung Min","Arabic","Japanese"], "default": "Major" },
+            { "key": "steps", "label": "Steps", "type": "int", "min": 1, "max": 64, "step": 1, "default": 16 },
+            { "key": "capture", "label": "Capture", "type": "int", "min": 0, "max": 64, "step": 1, "default": 0 },
+            { "key": "evolve", "label": "Evolve", "type": "int", "min": 0, "max": 100, "step": 1, "default": 20 },
+            { "key": "stutter", "label": "Stutter", "type": "int", "min": 0, "max": 100, "step": 1, "default": 0 },
+            { "key": "octaves", "label": "Octaves", "type": "int", "min": 0, "max": 100, "step": 1, "default": 0 },
+            { "key": "chord", "label": "Chord", "type": "int", "min": 0, "max": 100, "step": 1, "default": 0 }
+          ]
+        },
+        "sync": {
+          "name": "Sync",
+          "knobs": ["sync", "tempo", "division", "vel_mode", "velocity", "gate"],
+          "params": [
+            { "key": "sync", "label": "Sync", "type": "enum", "options": ["Internal","Move"], "default": "Move" },
+            { "key": "tempo", "label": "Tempo", "type": "int", "min": 20, "max": 500, "step": 1, "default": 120 },
+            { "key": "division", "label": "Division", "type": "enum", "options": ["1/1","1/1T","1/1D","1/2","1/2T","1/2D","1/4","1/4T","1/4D","1/8","1/8T","1/8D","1/16","1/16T","1/16D","1/32","1/32T","1/32D"], "default": "1/8" },
+            { "key": "vel_mode", "label": "Vel Mode", "type": "enum", "options": ["Fixed","Random","Moving"], "default": "Fixed" },
+            { "key": "velocity", "label": "Velocity", "type": "int", "min": 0, "max": 127, "step": 1, "default": 100 },
+            { "key": "gate", "label": "Gate", "type": "int", "min": 1, "max": 200, "step": 1, "default": 80 }
+          ]
+        }
+      }
+    }
+  },
+  "chain_params": [
+    { "key": "root", "name": "Root", "type": "enum", "options": ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"] },
+    { "key": "scale", "name": "Scale", "type": "enum", "options": ["Major","Minor","Dorian","Phrygian","Lydian","Mixolydian","Aeolian","Locrian","Harm Min","Melod Min","Penta Maj","Penta Min","Blues","Whole Tone","Diminished","Augmented","Chromatic","Hung Min","Arabic","Japanese"] },
+    { "key": "steps", "name": "Steps", "type": "int", "min": 1, "max": 64, "step": 1 },
+    { "key": "capture", "name": "Capture", "type": "int", "min": 0, "max": 64, "step": 1 },
+    { "key": "evolve", "name": "Evolve", "type": "int", "min": 0, "max": 100, "step": 1 },
+    { "key": "stutter", "name": "Stutter", "type": "int", "min": 0, "max": 100, "step": 1 },
+    { "key": "octaves", "name": "Octaves", "type": "int", "min": 0, "max": 100, "step": 1 },
+    { "key": "chord", "name": "Chord", "type": "int", "min": 0, "max": 100, "step": 1 },
+    { "key": "sync", "name": "Sync", "type": "enum", "options": ["Internal","Move"] },
+    { "key": "tempo", "name": "Tempo", "type": "int", "min": 20, "max": 500, "step": 1 },
+    { "key": "division", "name": "Division", "type": "enum", "options": ["1/1","1/1T","1/1D","1/2","1/2T","1/2D","1/4","1/4T","1/4D","1/8","1/8T","1/8D","1/16","1/16T","1/16D","1/32","1/32T","1/32D"] },
+    { "key": "vel_mode", "name": "Vel Mode", "type": "enum", "options": ["Fixed","Random","Moving"] },
+    { "key": "velocity", "name": "Velocity", "type": "int", "min": 0, "max": 127, "step": 1 },
+    { "key": "gate", "name": "Gate", "type": "int", "min": 1, "max": 200, "step": 1 }
+  ]
+}
