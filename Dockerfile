@@ -5,6 +5,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libc6-dev-arm64-cross \
     dos2unix \
     make \
+    git \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 ENV CROSS_PREFIX=aarch64-linux-gnu-
