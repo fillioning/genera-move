@@ -44,7 +44,10 @@
  * ══════════════════════════════════════════════════════════════════════════════ */
 
 typedef enum { SYNC_INTERNAL = 0, SYNC_CLOCK } sync_mode_t;
-typedef enum { VEL_FIXED = 0, VEL_RANDOM, VEL_MOVING } vel_mode_t;
+typedef enum { VEL_HUMAN = 0, VEL_FIXED, VEL_RANDOM, VEL_MOVING } vel_mode_t;
+typedef enum { STUT_CHAOS = 0, STUT_TIMED } stutter_mode_t;
+typedef enum { GEN_UP = 0, GEN_DOWN, GEN_UPDOWN, GEN_DOWNUP, GEN_EXCLUDE, GEN_WALK, GEN_RANDOM } gen_mode_t;
+#define NUM_GEN_MODES 7
 
 /* ══════════════════════════════════════════════════════════════════════════════
  * Scale definitions — intervals from root (semitones)
@@ -88,34 +91,36 @@ typedef struct {
     double notes_per_beat; /* how many steps fit in one beat */
 } division_def_t;
 
-/* T = triplet (3 in the space of 2), D = dotted (1.5x duration = 2/3 rate) */
+/* Ordered slow→fast: Dotted (1.5x duration), Normal, Triplet (2/3x duration) */
 static const division_def_t g_divisions[NUM_DIVISIONS] = {
-    { "1/1",   0.25  },    /* whole note: 1 step per 4 beats */
-    { "1/1T",  0.375 },    /* whole triplet */
     { "1/1D",  0.1667},    /* whole dotted */
+    { "1/1",   0.25  },    /* whole note */
+    { "1/1T",  0.375 },    /* whole triplet */
+    { "1/2D",  0.3333},    /* half dotted */
     { "1/2",   0.5   },    /* half note */
     { "1/2T",  0.75  },    /* half triplet */
-    { "1/2D",  0.3333},    /* half dotted */
+    { "1/4D",  0.6667},    /* quarter dotted */
     { "1/4",   1.0   },    /* quarter note */
     { "1/4T",  1.5   },    /* quarter triplet */
-    { "1/4D",  0.6667},    /* quarter dotted */
-    { "1/8",   2.0   },    /* eighth note (default) */
-    { "1/8T",  3.0   },    /* eighth triplet */
     { "1/8D",  1.3333},    /* eighth dotted */
+    { "1/8",   2.0   },    /* eighth note */
+    { "1/8T",  3.0   },    /* eighth triplet */
+    { "1/16D", 2.6667},    /* sixteenth dotted */
     { "1/16",  4.0   },    /* sixteenth */
     { "1/16T", 6.0   },    /* sixteenth triplet */
-    { "1/16D", 2.6667},    /* sixteenth dotted */
+    { "1/32D", 5.3333},    /* thirty-second dotted */
     { "1/32",  8.0   },    /* thirty-second */
     { "1/32T", 12.0  },    /* thirty-second triplet */
-    { "1/32D", 5.3333},    /* thirty-second dotted */
 };
 
 static const char *g_root_names[NUM_ROOTS] = {
     "C","C#","D","D#","E","F","F#","G","G#","A","A#","B"
 };
 
-static const char *g_vel_mode_names[3] = { "Fixed", "Random", "Moving" };
+static const char *g_vel_mode_names[4] = { "Human", "Fixed", "Random", "Moving" };
 static const char *g_sync_names[2] = { "Internal", "Move" };
+static const char *g_stut_mode_names[2] = { "Chaos", "Timed" };
+static const char *g_gen_mode_names[NUM_GEN_MODES] = { "Up", "Down", "Up/Down", "Down/Up", "Exclude", "Walk", "Random" };
 
 /* ══════════════════════════════════════════════════════════════════════════════
  * Helpers
@@ -203,6 +208,7 @@ typedef struct {
     int stutter;        /* 0-100 */
     int octaves;        /* 0-100 */
     int chord;          /* 0-100 */
+    gen_mode_t gen_mode; /* Up, Down, Up/Down, Random */
 
     /* Sync page params */
     sync_mode_t sync_mode;
@@ -211,6 +217,8 @@ typedef struct {
     vel_mode_t vel_mode;
     int velocity;       /* 0-127 */
     int gate;           /* 1-200 % */
+
+    int humanize;       /* 0-100 timing humanize */
 
     /* Timing — internal */
     int sample_rate;
@@ -227,6 +235,8 @@ typedef struct {
     /* Sequence state */
     uint64_t current_step;
     uint32_t rng_state;
+    uint32_t rng_seed_counter;  /* increments on each transport start for varied Random */
+    int walk_pos;               /* current position for Walk mode */
 
     /* Step history (ring buffer for capture) */
     step_entry_t step_history[MAX_STEPS];
@@ -245,6 +255,20 @@ typedef struct {
     /* Velocity moving mode state */
     int vel_moving_pos;   /* 0-254 triangle wave position */
     int vel_moving_dir;   /* +1 or -1 */
+
+    /* Last emitted step — for beat-repeat */
+    step_entry_t last_step;
+    int last_step_valid;          /* 0 until first step emitted */
+
+    /* Stutter engine — chaotic off-grid notes + beat-repeat bursts */
+    stutter_mode_t stutter_mode;  /* 0=Chaos, 1=Timed */
+    uint32_t stutter_rng;         /* separate RNG for stutter */
+    double stutter_accum;         /* independent sample accumulator */
+    double stutter_next_interval; /* samples until next off-grid stutter fire */
+    int stutter_burst_left;       /* remaining rapid-fire repeats in current burst */
+    int stutter_burst_total;      /* total notes in this burst (for velocity ramp) */
+    double stutter_burst_interval;/* samples between burst notes */
+    double stutter_burst_accum;   /* accumulator for burst timing */
 
     /* UI state */
     int current_level;   /* 0=root, 1=genera, 2=sync */
@@ -364,24 +388,32 @@ static void recalc_clock_timing(genera_instance_t *inst) {
 static int compute_velocity(genera_instance_t *inst) {
     int base = clamp_int(inst->velocity, 1, 127);
     switch (inst->vel_mode) {
-        case VEL_FIXED:
-            return base;
-        case VEL_RANDOM: {
-            int range = base / 3;
-            if (range < 5) range = 5;
+        case VEL_HUMAN: {
+            /* ±20% of base velocity — feels natural */
+            int range = base / 5;
+            if (range < 3) range = 3;
             int offset = lcg_range(&inst->rng_state, -range, range);
             return clamp_int(base + offset, 1, 127);
         }
+        case VEL_FIXED:
+            return base;
+        case VEL_RANDOM: {
+            /* Fully random velocity 1-127 */
+            return lcg_range(&inst->rng_state, 1, 127);
+        }
         case VEL_MOVING: {
-            /* Triangle wave: position 0→127→0 */
+            /* Triangle wave tied to steps: up for steps/2, down for steps/2 */
             int vel_min = 20;
             int vel_max = base < vel_min ? vel_min : base;
-            float t = (float)inst->vel_moving_pos / 127.0f;
+            int half = inst->steps / 2;
+            if (half < 1) half = 1;
+            float t = (float)inst->vel_moving_pos / (float)half;
+            if (t > 1.0f) t = 1.0f;
             int vel = vel_min + (int)(t * (float)(vel_max - vel_min));
             /* Advance triangle */
-            inst->vel_moving_pos += inst->vel_moving_dir * 4;
-            if (inst->vel_moving_pos >= 127) {
-                inst->vel_moving_pos = 127;
+            inst->vel_moving_pos += inst->vel_moving_dir;
+            if (inst->vel_moving_pos >= half) {
+                inst->vel_moving_pos = half;
                 inst->vel_moving_dir = -1;
             } else if (inst->vel_moving_pos <= 0) {
                 inst->vel_moving_pos = 0;
@@ -393,9 +425,260 @@ static int compute_velocity(genera_instance_t *inst) {
     return base;
 }
 
+/* Forward declarations for stutter engine */
+static int compute_gate_samples_ext(genera_instance_t *inst, int gate_pct);
+
+/* ══════════════════════════════════════════════════════════════════════════════
+ * Stutter engine — chaotic off-grid notes + beat-repeat bursts
+ *
+ * Two layers, both independent of the main sequencer clock:
+ *
+ * 1) Off-grid chaotic notes: own sample accumulator fires at random intervals
+ *    completely detached from the step grid. This is what creates the chaotic,
+ *    "wrong-timing" feel. Chaos mode = wild intervals, Timed mode = musical
+ *    subdivisions but still off the main grid.
+ *
+ * 2) Beat-repeat bursts: after any note (normal or stutter), chance to
+ *    rapid-fire repeat that same note 2-6 times with velocity decay.
+ *
+ * Both layers ADD notes on top of the normal sequence.
+ * ══════════════════════════════════════════════════════════════════════════════ */
+
+/* Compute random interval for Chaos mode — completely off-grid */
+static double stutter_chaos_interval(genera_instance_t *inst) {
+    int sr = inst->sample_rate > 0 ? inst->sample_rate : DEFAULT_SAMPLE_RATE;
+    double step = inst->step_interval_f;
+    if (step <= 0.0) {
+        double npb = g_divisions[clamp_int(inst->division, 0, NUM_DIVISIONS - 1)].notes_per_beat;
+        if (npb <= 0.0) npb = 2.0;
+        step = ((double)sr * 60.0) / ((double)inst->tempo * npb);
+    }
+
+    float pct = (float)inst->stutter / 100.0f;
+    /* Min: at 100% = ~15ms, at 1% = 2x step */
+    double min_ivl = step * (2.0 - 1.99 * pct);
+    if (min_ivl < (double)sr * 0.015) min_ivl = (double)sr * 0.015;
+    /* Max: at 100% = 0.5x step, at 1% = 5x step */
+    double max_ivl = step * (5.0 - 4.5 * pct);
+    if (max_ivl < min_ivl) max_ivl = min_ivl + 1.0;
+
+    uint32_t r = lcg_next(&inst->stutter_rng);
+    double t = (double)(r & 0xFFFFu) / 65535.0;
+    t = t * t; /* bias toward shorter intervals */
+    return min_ivl + t * (max_ivl - min_ivl);
+}
+
+/* Compute interval for Timed mode — musical subdivisions, still off-grid */
+static double stutter_timed_interval(genera_instance_t *inst) {
+    double step = inst->step_interval_f;
+    if (step <= 0.0) {
+        int sr = inst->sample_rate > 0 ? inst->sample_rate : DEFAULT_SAMPLE_RATE;
+        double npb = g_divisions[clamp_int(inst->division, 0, NUM_DIVISIONS - 1)].notes_per_beat;
+        if (npb <= 0.0) npb = 2.0;
+        step = ((double)sr * 60.0) / ((double)inst->tempo * npb);
+    }
+
+    float pct = (float)inst->stutter / 100.0f;
+    static const double mults[] = { 0.25, 0.333, 0.5, 0.5, 0.75, 1.0, 1.0, 1.5, 2.0, 3.0 };
+    int lo = (int)((1.0f - pct) * 6.0f);
+    int hi = lo + 3;
+    if (lo < 0) lo = 0;
+    if (hi > 9) hi = 9;
+
+    int idx = lcg_range(&inst->stutter_rng, lo, hi);
+    double interval = step * mults[idx];
+
+    /* Occasional gap at low stutter */
+    if (pct < 0.4f && lcg_chance(&inst->stutter_rng, (int)((1.0f - pct) * 40.0f)))
+        interval *= 2.0;
+
+    int sr = inst->sample_rate > 0 ? inst->sample_rate : DEFAULT_SAMPLE_RATE;
+    if (interval < (double)sr * 0.015) interval = (double)sr * 0.015;
+    return interval;
+}
+
+/* Maybe start a beat-repeat burst (rapid-fire of the last played note) */
+static void stutter_maybe_burst(genera_instance_t *inst) {
+    float pct = (float)inst->stutter / 100.0f;
+    /* Burst chance: 10% at low, ~50% at stutter=100 */
+    int burst_chance = 10 + (int)(pct * 40.0f);
+    if (lcg_chance(&inst->stutter_rng, burst_chance)) {
+        int sr = inst->sample_rate > 0 ? inst->sample_rate : DEFAULT_SAMPLE_RATE;
+        inst->stutter_burst_left = lcg_range(&inst->stutter_rng, 2, 2 + (int)(pct * 4.0f));
+        inst->stutter_burst_total = inst->stutter_burst_left;
+        double min_ms = 25.0 + (1.0 - pct) * 35.0;
+        double max_ms = min_ms + 25.0;
+        double t = (double)(lcg_next(&inst->stutter_rng) & 0xFFFFu) / 65535.0;
+        inst->stutter_burst_interval = (double)sr * (min_ms + t * (max_ms - min_ms)) / 1000.0;
+        inst->stutter_burst_accum = 0.0;
+    }
+}
+
+/* Compute stutter octave range from the Octaves parameter.
+ * octaves=0:  -1 to +1   (conservative)
+ * octaves=50: -2 to +2
+ * octaves=100: -3 to +3
+ * Down is always clamped so notes never go below 1 octave under the sequence root. */
+static void stutter_octave_range(genera_instance_t *inst, int *oct_lo, int *oct_hi) {
+    int max_oct = 1 + (inst->octaves * 2 / 100); /* 1 at 0%, 2 at 50%, 3 at 100% */
+    if (max_oct > 3) max_oct = 3;
+    *oct_hi = max_oct;
+    *oct_lo = -max_oct;
+
+    /* Floor: never go lower than 1 octave below sequence root (degree 0) */
+    int seq_root_note = BASE_MIDI_NOTE + inst->root;
+    int floor_note = seq_root_note - 12; /* 1 octave below */
+    /* Current note at degree 0, octave_shift=oct_lo must be >= floor_note */
+    int note_at_lo = seq_root_note + (*oct_lo) * 12;
+    while (note_at_lo < floor_note && *oct_lo < 0) {
+        (*oct_lo)++;
+        note_at_lo += 12;
+    }
+}
+
+/* Fire an off-grid stutter note */
+static void stutter_fire_note(genera_instance_t *inst,
+                               uint8_t out[][3], int lens[], int max, int *cnt) {
+    step_entry_t entry;
+    memset(&entry, 0, sizeof(entry));
+
+    float pct = (float)inst->stutter / 100.0f;
+    int base = (int)(inst->current_step % (uint64_t)(inst->steps > 0 ? inst->steps : 16));
+    int oct_lo, oct_hi;
+    stutter_octave_range(inst, &oct_lo, &oct_hi);
+    /* Hard floor: 1 octave below sequence root */
+    int stutter_floor = BASE_MIDI_NOTE + inst->root - 12;
+    if (stutter_floor < MIN_MIDI_NOTE) stutter_floor = MIN_MIDI_NOTE;
+
+    if (inst->stutter_mode == STUT_TIMED) {
+        int range = 2 + (int)(pct * 4.0f);
+        entry.degree = base + lcg_range(&inst->stutter_rng, -range, range);
+        entry.velocity = compute_velocity(inst);
+
+        if (lcg_chance(&inst->stutter_rng, (int)(pct * 40.0f))) {
+            entry.octave_shift = lcg_range(&inst->stutter_rng, oct_lo, oct_hi);
+            if (entry.octave_shift == 0) entry.octave_shift = lcg_chance(&inst->stutter_rng, 50) ? 1 : (oct_lo < 0 ? oct_lo : 1);
+        }
+
+        int gate;
+        if (lcg_chance(&inst->stutter_rng, (int)(pct * 40.0f)))
+            gate = compute_gate_samples_ext(inst, 100 + (int)(pct * 80.0f));
+        else
+            gate = compute_gate_samples_ext(inst, 40 + (int)((1.0f - pct) * 40.0f));
+
+        int root_note = scale_degree_to_midi(inst->root, inst->scale, entry.degree);
+        root_note += entry.octave_shift * 12;
+        root_note = clamp_int(root_note, stutter_floor, MAX_MIDI_NOTE);
+        note_on(inst, (uint8_t)root_note, (uint8_t)entry.velocity, gate, out, lens, max, cnt);
+
+        if (inst->chord > 0 && lcg_chance(&inst->stutter_rng, (int)(pct * 25.0f))) {
+            int cn = scale_degree_to_midi(inst->root, inst->scale, entry.degree + 2);
+            cn += entry.octave_shift * 12;
+            cn = clamp_int(cn, stutter_floor, MAX_MIDI_NOTE);
+            if (cn != root_note)
+                note_on(inst, (uint8_t)cn, (uint8_t)entry.velocity, gate, out, lens, max, cnt);
+        }
+    } else {
+        int range = 3 + (int)(pct * 7.0f);
+        entry.degree = base + lcg_range(&inst->stutter_rng, -range, range);
+        entry.velocity = compute_velocity(inst);
+        entry.velocity = clamp_int(entry.velocity + lcg_range(&inst->stutter_rng, -15, 10), 20, 127);
+
+        if (lcg_chance(&inst->stutter_rng, 15 + (int)(pct * 35.0f)))
+            entry.octave_shift = lcg_range(&inst->stutter_rng, oct_lo, oct_hi);
+
+        int gate = compute_gate_samples_ext(inst, 25 + lcg_range(&inst->stutter_rng, 0, (int)(pct * 60.0f)));
+        int root_note = scale_degree_to_midi(inst->root, inst->scale, entry.degree);
+        root_note += entry.octave_shift * 12;
+        root_note = clamp_int(root_note, stutter_floor, MAX_MIDI_NOTE);
+        note_on(inst, (uint8_t)root_note, (uint8_t)entry.velocity, gate, out, lens, max, cnt);
+
+        if (inst->chord > 0 && lcg_chance(&inst->stutter_rng, (int)(pct * 20.0f))) {
+            int cn = scale_degree_to_midi(inst->root, inst->scale, entry.degree + lcg_range(&inst->stutter_rng, 1, 3) * 2);
+            cn += entry.octave_shift * 12;
+            cn = clamp_int(cn, stutter_floor, MAX_MIDI_NOTE);
+            if (cn != root_note)
+                note_on(inst, (uint8_t)cn, (uint8_t)entry.velocity, gate, out, lens, max, cnt);
+        }
+    }
+
+    /* Remember for beat-repeat */
+    inst->last_step = entry;
+    inst->last_step_valid = 1;
+
+    /* Maybe trigger a beat-repeat burst of this note */
+    stutter_maybe_burst(inst);
+}
+
+/* Independent off-grid stutter clock + burst processing */
+static void stutter_tick(genera_instance_t *inst, int frames,
+                          uint8_t out[][3], int lens[], int max, int *cnt) {
+    if (inst->stutter <= 0 || !inst->clock_running) return;
+
+    /* Beat-repeat burst processing */
+    if (inst->stutter_burst_left > 0 && inst->last_step_valid) {
+        inst->stutter_burst_accum += (double)frames;
+        while (inst->stutter_burst_left > 0 && inst->stutter_burst_accum >= inst->stutter_burst_interval && *cnt < max) {
+            inst->stutter_burst_accum -= inst->stutter_burst_interval;
+            inst->stutter_burst_left--;
+
+            step_entry_t *ref = &inst->last_step;
+            float progress = 1.0f - (float)inst->stutter_burst_left / (float)inst->stutter_burst_total;
+            int vel = ref->velocity - (int)(progress * 30.0f);
+            vel = clamp_int(vel + lcg_range(&inst->stutter_rng, -5, 5), 25, 127);
+            int gate = compute_gate_samples_ext(inst, 20 + lcg_range(&inst->stutter_rng, 0, 15));
+
+            int root_note = scale_degree_to_midi(inst->root, inst->scale, ref->degree);
+            root_note += ref->octave_shift * 12;
+            root_note = clamp_int(root_note, MIN_MIDI_NOTE, MAX_MIDI_NOTE);
+            note_on(inst, (uint8_t)root_note, (uint8_t)vel, gate, out, lens, max, cnt);
+
+            for (int i = 0; i < ref->chord_size && i < MAX_CHORD_NOTES; i++) {
+                int cn = scale_degree_to_midi(inst->root, inst->scale, ref->chord_degrees[i]);
+                cn += ref->octave_shift * 12;
+                cn = clamp_int(cn, MIN_MIDI_NOTE, MAX_MIDI_NOTE);
+                if (cn != root_note)
+                    note_on(inst, (uint8_t)cn, (uint8_t)vel, gate, out, lens, max, cnt);
+            }
+        }
+    }
+
+    /* Off-grid chaotic note accumulator */
+    inst->stutter_accum += (double)frames;
+    while (inst->stutter_accum >= inst->stutter_next_interval && *cnt < max) {
+        inst->stutter_accum -= inst->stutter_next_interval;
+        stutter_fire_note(inst, out, lens, max, cnt);
+        inst->stutter_next_interval = (inst->stutter_mode == STUT_TIMED)
+            ? stutter_timed_interval(inst) : stutter_chaos_interval(inst);
+    }
+}
+
+static void stutter_reset(genera_instance_t *inst) {
+    inst->stutter_accum = 0.0;
+    inst->stutter_next_interval = 1000.0;
+    inst->stutter_burst_left = 0;
+    inst->stutter_burst_total = 0;
+    inst->stutter_burst_accum = 0.0;
+    inst->stutter_rng = 54321u;
+}
+
 /* ══════════════════════════════════════════════════════════════════════════════
  * Step generation — core generative engine
  * ══════════════════════════════════════════════════════════════════════════════ */
+
+/* Gate with custom percentage */
+static int compute_gate_samples_ext(genera_instance_t *inst, int gate_pct) {
+    double base = inst->step_interval_f;
+    if (base <= 0.0) {
+        int sr = inst->sample_rate > 0 ? inst->sample_rate : DEFAULT_SAMPLE_RATE;
+        double npb = g_divisions[clamp_int(inst->division, 0, NUM_DIVISIONS - 1)].notes_per_beat;
+        if (npb <= 0.0) npb = 2.0;
+        base = ((double)sr * 60.0) / ((double)inst->tempo * npb);
+    }
+    int samples = (int)(base * (double)gate_pct / 100.0);
+    if (samples < 64) samples = 64;
+    return samples;
+}
 
 static int compute_gate_samples(genera_instance_t *inst) {
     double base = inst->step_interval_f;
@@ -406,13 +689,19 @@ static int compute_gate_samples(genera_instance_t *inst) {
         if (npb <= 0.0) npb = 2.0;
         base = ((double)sr * 60.0) / ((double)inst->tempo * npb);
     }
-    int samples = (int)(base * (double)inst->gate / 100.0);
+    /* Inverted: low gate value = short notes, high gate value = long notes */
+    int gate_pct = 201 - inst->gate;
+    int samples = (int)(base * (double)gate_pct / 100.0);
     if (samples < 64) samples = 64;
     return samples;
 }
 
 static void emit_step(genera_instance_t *inst, const step_entry_t *entry,
                       uint8_t out[][3], int lens[], int max, int *cnt) {
+    /* Remember for beat-repeat */
+    inst->last_step = *entry;
+    inst->last_step_valid = 1;
+
     int vel = entry->velocity;
     int gate = compute_gate_samples(inst);
     int root_note = scale_degree_to_midi(inst->root, inst->scale, entry->degree);
@@ -438,8 +727,59 @@ static void generate_step(genera_instance_t *inst,
     step_entry_t entry;
     memset(&entry, 0, sizeof(entry));
 
-    /* Base degree: walk through scale degrees based on step position */
-    int base_degree = (int)(inst->current_step % (uint64_t)inst->steps);
+    /* Base degree: walk through scale degrees based on gen mode */
+    int base_degree;
+    switch (inst->gen_mode) {
+        case GEN_UP:
+            base_degree = (int)(inst->current_step % (uint64_t)inst->steps);
+            break;
+        case GEN_DOWN:
+            base_degree = (inst->steps - 1) - (int)(inst->current_step % (uint64_t)inst->steps);
+            break;
+        case GEN_UPDOWN: {
+            int period = inst->steps * 2;
+            int phase = (int)(inst->current_step % (uint64_t)period);
+            if (phase < inst->steps)
+                base_degree = phase;
+            else
+                base_degree = (period - 1) - phase;
+            break;
+        }
+        case GEN_DOWNUP: {
+            int period = inst->steps * 2;
+            int phase = (int)(inst->current_step % (uint64_t)period);
+            if (phase < inst->steps)
+                base_degree = (inst->steps - 1) - phase;  /* descending first */
+            else
+                base_degree = phase - inst->steps;          /* then ascending */
+            break;
+        }
+        case GEN_EXCLUDE: {
+            /* Up/Down but skip repeated top and bottom notes */
+            int span = inst->steps > 1 ? inst->steps - 1 : 1;
+            int period = span * 2;
+            int phase = (int)(inst->current_step % (uint64_t)period);
+            if (phase < span)
+                base_degree = phase;            /* 0,1,2,...,steps-2 */
+            else
+                base_degree = period - phase;   /* steps-2,...,1,0 — top excluded */
+            break;
+        }
+        case GEN_WALK: {
+            /* Drunk walk: step ±1 or ±2, clamped to 0..steps-1 */
+            int step = lcg_range(&inst->rng_state, -2, 2);
+            if (step == 0) step = lcg_chance(&inst->rng_state, 50) ? 1 : -1;
+            inst->walk_pos = clamp_int(inst->walk_pos + step, 0, inst->steps - 1);
+            base_degree = inst->walk_pos;
+            break;
+        }
+        case GEN_RANDOM:
+            base_degree = lcg_range(&inst->rng_state, 0, inst->steps - 1);
+            break;
+        default:
+            base_degree = (int)(inst->current_step % (uint64_t)inst->steps);
+            break;
+    }
 
     /* Evolve: chance to deviate */
     if (lcg_chance(&inst->rng_state, inst->evolve)) {
@@ -481,18 +821,6 @@ static void generate_step(genera_instance_t *inst,
 
     /* Emit the main step */
     emit_step(inst, &entry, out, lens, max, cnt);
-
-    /* Stutter: chance to emit an extra random step */
-    if (lcg_chance(&inst->rng_state, inst->stutter)) {
-        step_entry_t stutter_entry;
-        memset(&stutter_entry, 0, sizeof(stutter_entry));
-        stutter_entry.degree = base_degree + lcg_range(&inst->rng_state, -5, 5);
-        stutter_entry.velocity = compute_velocity(inst);
-        if (lcg_chance(&inst->rng_state, inst->octaves)) {
-            stutter_entry.octave_shift = lcg_range(&inst->rng_state, -1, 1);
-        }
-        emit_step(inst, &stutter_entry, out, lens, max, cnt);
-    }
 }
 
 static void emit_capture_step(genera_instance_t *inst,
@@ -500,11 +828,6 @@ static void emit_capture_step(genera_instance_t *inst,
     if (inst->capture_len <= 0) return;
 
     step_entry_t entry = inst->capture_buf[inst->capture_pos];
-
-    /* Stutter affects captured loop too */
-    if (lcg_chance(&inst->rng_state, inst->stutter)) {
-        entry.degree += lcg_range(&inst->rng_state, -2, 2);
-    }
 
     /* Octaves affects captured loop too */
     if (lcg_chance(&inst->rng_state, inst->octaves)) {
@@ -544,10 +867,8 @@ static void do_capture(genera_instance_t *inst) {
 
 static void run_step(genera_instance_t *inst,
                      uint8_t out[][3], int lens[], int max, int *cnt) {
-    /* Generate new note/chord */
     generate_step(inst, out, lens, max, cnt);
 
-    /* If capture is active, also emit from capture loop */
     if (inst->capture_len > 0) {
         emit_capture_step(inst, out, lens, max, cnt);
     }
@@ -566,6 +887,11 @@ static void handle_transport_start(genera_instance_t *inst) {
     inst->current_step = 0;
     inst->vel_moving_pos = 0;
     inst->vel_moving_dir = 1;
+    inst->walk_pos = 0;
+    /* Re-seed main RNG each transport start so Random mode varies */
+    inst->rng_seed_counter++;
+    inst->rng_state = 12345u + inst->rng_seed_counter * 7919u;
+    stutter_reset(inst);
 }
 
 static int handle_transport_stop(genera_instance_t *inst,
@@ -577,6 +903,7 @@ static int handle_transport_stop(genera_instance_t *inst,
     inst->clock_counter = 0;
     inst->current_step = 0;
     inst->samples_until_step_f = inst->step_interval_f > 0.0 ? inst->step_interval_f : 1.0;
+    stutter_reset(inst);
     return count;
 }
 
@@ -585,17 +912,17 @@ static int handle_transport_stop(genera_instance_t *inst,
  * ══════════════════════════════════════════════════════════════════════════════ */
 
 static const char *g_genera_knob_keys[8] = {
-    "root", "scale", "steps", "capture", "evolve", "stutter", "octaves", "chord"
+    "root", "division", "steps", "capture", "evolve", "stutter", "octaves", "chord"
 };
 static const char *g_genera_knob_names[8] = {
-    "Root", "Scale", "Steps", "Capture", "Evolve", "Stutter", "Octaves", "Chord"
+    "Root", "Division", "Steps", "Capture", "Evolve", "Stutter", "Octaves", "Chord"
 };
 
 static const char *g_sync_knob_keys[8] = {
-    "sync", "tempo", "division", "vel_mode", "velocity", "gate", NULL, NULL
+    "sync", "tempo", "division", "vel_mode", "velocity", "gate", "stut_mode", "humanize"
 };
 static const char *g_sync_knob_names[8] = {
-    "Sync", "Tempo", "Division", "Vel Mode", "Velocity", "Gate", "", ""
+    "Sync", "Tempo", "Division", "Vel Mode", "Velocity", "Gate", "Stut Mode", "Humanize"
 };
 
 /* ══════════════════════════════════════════════════════════════════════════════
@@ -636,7 +963,21 @@ static void knob_adjust_param(genera_instance_t *inst, const char *key, int delt
     }
     if (strcmp(key, "vel_mode") == 0) {
         int v = (int)inst->vel_mode + delta;
-        inst->vel_mode = (vel_mode_t)clamp_int(v, 0, 2);
+        inst->vel_mode = (vel_mode_t)clamp_int(v, 0, 3);
+        return;
+    }
+    if (strcmp(key, "humanize") == 0) {
+        inst->humanize = clamp_int(inst->humanize + delta, 0, 100);
+        return;
+    }
+    if (strcmp(key, "stut_mode") == 0) {
+        int v = (int)inst->stutter_mode + delta;
+        inst->stutter_mode = (stutter_mode_t)clamp_int(v, 0, 1);
+        return;
+    }
+    if (strcmp(key, "gen_mode") == 0) {
+        int v = (int)inst->gen_mode + delta;
+        inst->gen_mode = (gen_mode_t)clamp_int(v, 0, NUM_GEN_MODES - 1);
         return;
     }
     if (strcmp(key, "capture") == 0) {
@@ -750,6 +1091,11 @@ static void genera_set_param(void *instance, const char *key, const char *val) {
     if (strcmp(key, "stutter") == 0) { inst->stutter = clamp_int(atoi(val), 0, 100); return; }
     if (strcmp(key, "octaves") == 0) { inst->octaves = clamp_int(atoi(val), 0, 100); return; }
     if (strcmp(key, "chord") == 0) { inst->chord = clamp_int(atoi(val), 0, 100); return; }
+    if (strcmp(key, "gen_mode") == 0) {
+        int idx = find_enum_index(val, g_gen_mode_names, NUM_GEN_MODES);
+        if (idx >= 0) inst->gen_mode = (gen_mode_t)idx;
+        return;
+    }
 
     if (strcmp(key, "sync") == 0) {
         int idx = find_enum_index(val, g_sync_names, 2);
@@ -775,12 +1121,18 @@ static void genera_set_param(void *instance, const char *key, const char *val) {
         return;
     }
     if (strcmp(key, "vel_mode") == 0) {
-        int idx = find_enum_index(val, g_vel_mode_names, 3);
+        int idx = find_enum_index(val, g_vel_mode_names, 4);
         if (idx >= 0) inst->vel_mode = (vel_mode_t)idx;
         return;
     }
     if (strcmp(key, "velocity") == 0) { inst->velocity = clamp_int(atoi(val), 0, 127); return; }
     if (strcmp(key, "gate") == 0) { inst->gate = clamp_int(atoi(val), 1, 200); return; }
+    if (strcmp(key, "humanize") == 0) { inst->humanize = clamp_int(atoi(val), 0, 100); return; }
+    if (strcmp(key, "stut_mode") == 0) {
+        int idx = find_enum_index(val, g_stut_mode_names, 2);
+        if (idx >= 0) inst->stutter_mode = (stutter_mode_t)idx;
+        return;
+    }
 }
 
 /* ══════════════════════════════════════════════════════════════════════════════
@@ -807,7 +1159,7 @@ static int genera_get_param(void *instance, const char *key, char *buf, int buf_
             } else {
                 keys = g_sync_knob_keys;
                 names = g_sync_knob_names;
-                if (!keys[ki]) return -1;
+                /* all 8 slots used */
             }
 
             if (is_name) return snprintf(buf, buf_len, "%s", names[ki]);
@@ -823,10 +1175,12 @@ static int genera_get_param(void *instance, const char *key, char *buf, int buf_
         return snprintf(buf, buf_len, "%s", g_scales[clamp_int(inst->scale, 0, NUM_SCALES - 1)].name);
     if (strcmp(key, "steps") == 0) return snprintf(buf, buf_len, "%d", inst->steps);
     if (strcmp(key, "capture") == 0) return snprintf(buf, buf_len, "%d", inst->capture);
-    if (strcmp(key, "evolve") == 0) return snprintf(buf, buf_len, "%d", inst->evolve);
-    if (strcmp(key, "stutter") == 0) return snprintf(buf, buf_len, "%d", inst->stutter);
-    if (strcmp(key, "octaves") == 0) return snprintf(buf, buf_len, "%d", inst->octaves);
-    if (strcmp(key, "chord") == 0) return snprintf(buf, buf_len, "%d", inst->chord);
+    if (strcmp(key, "evolve") == 0) return snprintf(buf, buf_len, "%d%%", inst->evolve);
+    if (strcmp(key, "stutter") == 0) return snprintf(buf, buf_len, "%d%%", inst->stutter);
+    if (strcmp(key, "octaves") == 0) return snprintf(buf, buf_len, "%d%%", inst->octaves);
+    if (strcmp(key, "chord") == 0) return snprintf(buf, buf_len, "%d%%", inst->chord);
+    if (strcmp(key, "gen_mode") == 0)
+        return snprintf(buf, buf_len, "%s", g_gen_mode_names[clamp_int((int)inst->gen_mode, 0, NUM_GEN_MODES - 1)]);
 
     if (strcmp(key, "sync") == 0)
         return snprintf(buf, buf_len, "%s", g_sync_names[clamp_int((int)inst->sync_mode, 0, 1)]);
@@ -834,9 +1188,12 @@ static int genera_get_param(void *instance, const char *key, char *buf, int buf_
     if (strcmp(key, "division") == 0)
         return snprintf(buf, buf_len, "%s", g_divisions[clamp_int(inst->division, 0, NUM_DIVISIONS - 1)].name);
     if (strcmp(key, "vel_mode") == 0)
-        return snprintf(buf, buf_len, "%s", g_vel_mode_names[clamp_int((int)inst->vel_mode, 0, 2)]);
+        return snprintf(buf, buf_len, "%s", g_vel_mode_names[clamp_int((int)inst->vel_mode, 0, 3)]);
     if (strcmp(key, "velocity") == 0) return snprintf(buf, buf_len, "%d", inst->velocity);
     if (strcmp(key, "gate") == 0) return snprintf(buf, buf_len, "%d", inst->gate);
+    if (strcmp(key, "humanize") == 0) return snprintf(buf, buf_len, "%d%%", inst->humanize);
+    if (strcmp(key, "stut_mode") == 0)
+        return snprintf(buf, buf_len, "%s", g_stut_mode_names[clamp_int((int)inst->stutter_mode, 0, 1)]);
 
     if (strcmp(key, "name") == 0) return snprintf(buf, buf_len, "Genera");
     if (strcmp(key, "bank_name") == 0) return snprintf(buf, buf_len, "Factory");
@@ -864,17 +1221,22 @@ static int genera_get_param(void *instance, const char *key, char *buf, int buf_
     if (strcmp(key, "state") == 0) {
         int pos = 0;
         if (!appendf(buf, buf_len, &pos,
-            "{\"root\":\"%s\",\"scale\":\"%s\",\"steps\":%d,\"capture\":%d,"
+            "{\"root\":\"%s\",\"scale\":\"%s\",\"gen_mode\":\"%s\","
+            "\"steps\":%d,\"capture\":%d,"
             "\"evolve\":%d,\"stutter\":%d,\"octaves\":%d,\"chord\":%d,"
             "\"sync\":\"%s\",\"tempo\":%d,\"division\":\"%s\","
-            "\"vel_mode\":\"%s\",\"velocity\":%d,\"gate\":%d}",
+            "\"vel_mode\":\"%s\",\"velocity\":%d,\"gate\":%d,"
+            "\"stut_mode\":\"%s\",\"humanize\":%d}",
             g_root_names[inst->root], g_scales[inst->scale].name,
+            g_gen_mode_names[(int)inst->gen_mode],
             inst->steps, inst->capture,
             inst->evolve, inst->stutter, inst->octaves, inst->chord,
             g_sync_names[(int)inst->sync_mode], inst->tempo,
             g_divisions[inst->division].name,
             g_vel_mode_names[(int)inst->vel_mode],
-            inst->velocity, inst->gate))
+            inst->velocity, inst->gate,
+            g_stut_mode_names[(int)inst->stutter_mode],
+            inst->humanize))
             return -1;
         return pos;
     }
@@ -909,17 +1271,23 @@ static void build_chain_params(genera_instance_t *inst) {
     appendf(buf, buf_len, &pos,
         "{\"key\":\"chord\",\"name\":\"Chord\",\"type\":\"int\",\"min\":0,\"max\":100,\"step\":1},");
     appendf(buf, buf_len, &pos,
+        "{\"key\":\"gen_mode\",\"name\":\"Gen Mode\",\"type\":\"enum\",\"options\":[\"Up\",\"Down\",\"Up/Down\",\"Down/Up\",\"Exclude\",\"Walk\",\"Random\"]},");
+    appendf(buf, buf_len, &pos,
         "{\"key\":\"sync\",\"name\":\"Sync\",\"type\":\"enum\",\"options\":[\"Internal\",\"Move\"]},");
     appendf(buf, buf_len, &pos,
         "{\"key\":\"tempo\",\"name\":\"Tempo\",\"type\":\"int\",\"min\":20,\"max\":500,\"step\":1},");
     appendf(buf, buf_len, &pos,
-        "{\"key\":\"division\",\"name\":\"Division\",\"type\":\"enum\",\"options\":[\"1/1\",\"1/1T\",\"1/1D\",\"1/2\",\"1/2T\",\"1/2D\",\"1/4\",\"1/4T\",\"1/4D\",\"1/8\",\"1/8T\",\"1/8D\",\"1/16\",\"1/16T\",\"1/16D\",\"1/32\",\"1/32T\",\"1/32D\"]},");
+        "{\"key\":\"division\",\"name\":\"Division\",\"type\":\"enum\",\"options\":[\"1/1D\",\"1/1\",\"1/1T\",\"1/2D\",\"1/2\",\"1/2T\",\"1/4D\",\"1/4\",\"1/4T\",\"1/8D\",\"1/8\",\"1/8T\",\"1/16D\",\"1/16\",\"1/16T\",\"1/32D\",\"1/32\",\"1/32T\"]},");
     appendf(buf, buf_len, &pos,
-        "{\"key\":\"vel_mode\",\"name\":\"Vel Mode\",\"type\":\"enum\",\"options\":[\"Fixed\",\"Random\",\"Moving\"]},");
+        "{\"key\":\"vel_mode\",\"name\":\"Vel Mode\",\"type\":\"enum\",\"options\":[\"Human\",\"Fixed\",\"Random\",\"Moving\"]},");
     appendf(buf, buf_len, &pos,
         "{\"key\":\"velocity\",\"name\":\"Velocity\",\"type\":\"int\",\"min\":0,\"max\":127,\"step\":1},");
     appendf(buf, buf_len, &pos,
-        "{\"key\":\"gate\",\"name\":\"Gate\",\"type\":\"int\",\"min\":1,\"max\":200,\"step\":1}");
+        "{\"key\":\"gate\",\"name\":\"Gate\",\"type\":\"int\",\"min\":1,\"max\":200,\"step\":1},");
+    appendf(buf, buf_len, &pos,
+        "{\"key\":\"stut_mode\",\"name\":\"Stut Mode\",\"type\":\"enum\",\"options\":[\"Chaos\",\"Timed\"]},");
+    appendf(buf, buf_len, &pos,
+        "{\"key\":\"humanize\",\"name\":\"Humanize\",\"type\":\"int\",\"min\":0,\"max\":100,\"step\":1}");
     appendf(buf, buf_len, &pos, "]");
 
     inst->chain_params_len = pos;
@@ -930,28 +1298,31 @@ static void *genera_create_instance(const char *module_dir, const char *config_j
     if (!inst) return NULL;
 
     /* Defaults */
-    inst->root = 0;         /* C */
-    inst->scale = 0;        /* Major */
-    inst->steps = 16;
+    inst->root = 2;         /* D */
+    inst->scale = 1;        /* Minor */
+    inst->steps = 8;
     inst->capture = 0;
-    inst->evolve = 20;
+    inst->evolve = 0;
     inst->stutter = 0;
     inst->octaves = 0;
     inst->chord = 0;
 
     inst->sync_mode = SYNC_CLOCK;  /* Move BPM by default */
     inst->tempo = DEFAULT_BPM;
-    inst->division = 9;    /* 1/8 */
-    inst->vel_mode = VEL_FIXED;
+    inst->division = 7;    /* 1/4 */
+    inst->vel_mode = VEL_HUMAN;
     inst->velocity = 100;
     inst->gate = 80;
 
     inst->rng_state = 12345u;
     inst->vel_moving_dir = 1;
+    inst->stutter_rng = 54321u;
+    inst->stutter_burst_left = 0;
+    inst->stutter_next_interval = 1000.0;
     inst->timing_dirty = 1;
     inst->step_interval_f = 1.0;
     inst->samples_until_step_f = 1.0;
-    inst->clocks_per_step = 6;  /* 1/8 note = 24/4 = 6 clocks */
+    inst->clocks_per_step = 24;  /* 1/4 note = 24/1 = 24 clocks */
 
     recalc_clock_timing(inst);
     build_chain_params(inst);
@@ -1053,7 +1424,17 @@ static int genera_tick(void *instance, int frames, int sample_rate,
             int local = 0;
             run_step(inst, out_msgs + count, out_lens + count, max_out - count, &local);
             count += local;
-            inst->samples_until_step_f += inst->step_interval_f;
+            double next = inst->step_interval_f;
+            /* Humanize: add timing jitter ±(humanize% * 15%) of step interval */
+            if (inst->humanize > 0) {
+                double max_jitter = next * 0.15 * ((double)inst->humanize / 100.0);
+                int jitter_range = (int)(max_jitter * 2.0);
+                if (jitter_range > 0) {
+                    int offset = lcg_range(&inst->rng_state, 0, jitter_range) - (int)max_jitter;
+                    next += (double)offset;
+                }
+            }
+            inst->samples_until_step_f += next;
             if (inst->samples_until_step_f < 1.0) inst->samples_until_step_f = 1.0;
         }
     } else {
@@ -1064,6 +1445,13 @@ static int genera_tick(void *instance, int frames, int sample_rate,
             count += local;
             inst->pending_step_triggers--;
         }
+    }
+
+    /* Stutter engine — off-grid chaotic notes + beat-repeat bursts */
+    if (inst->stutter > 0 && count < max_out) {
+        int stutter_local = 0;
+        stutter_tick(inst, frames, out_msgs + count, out_lens + count, max_out - count, &stutter_local);
+        count += stutter_local;
     }
 
     return count;
