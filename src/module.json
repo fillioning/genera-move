@@ -1,5 +1,5 @@
 {
-  "api_version": 1,
+  "api_version": 2,
   "id": "genera",
   "name": "Genera",
   "abbrev": "GEN",
@@ -8,9 +8,9 @@
   "description": "Generative note and chord sequencer",
   "author": "Vincent Fillion",
   "license": "MIT",
+  "component_type": "midi_fx",
   "capabilities": {
     "chainable": true,
-    "component_type": "midi_fx",
     "ui_hierarchy": {
       "levels": {
         "root": {
