@@ -4,6 +4,8 @@
 
 A MIDI FX module for [Schwung](https://github.com/charlesvestal/schwung) that produces evolving melodic patterns quantized to musical scales. Genera creates sequences that breathe and mutate — from precise ascending runs to chaotic stutter bursts with beat-repeat.
 
+Enable MIDI sync out from the Move menu for Genera to fully work.
+
 ## Features
 
 - **20 scales** — Major, Minor, Dorian, Phrygian, Lydian, Mixolydian, Aeolian, Locrian, Harmonic Minor, Melodic Minor, Pentatonic Major/Minor, Blues, Whole Tone, Diminished, Augmented, Chromatic, Hungarian Minor, Arabic, Japanese
