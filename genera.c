@@ -156,10 +156,14 @@ static int json_get_int(const char *json, const char *key, int *out) {
 
 static int json_get_str(const char *json, const char *key, char *out, int out_len) {
     char search[64];
-    snprintf(search, sizeof(search), "\"%s\":\"", key);
+    snprintf(search, sizeof(search), "\"%s\"", key);
     const char *p = strstr(json, search);
     if (!p) return -1;
     p += strlen(search);
+    /* Skip colon and whitespace (handles both compact and pretty-printed JSON) */
+    while (*p && (*p == ':' || *p == ' ' || *p == '\t')) p++;
+    if (*p != '"') return -1;
+    p++; /* skip opening quote */
     const char *end = strchr(p, '"');
     if (!end) return -1;
     int len = (int)(end - p);
