@@ -1161,6 +1161,69 @@ static void genera_set_param(void *instance, const char *key, const char *val) {
         if (idx >= 0) inst->stutter_mode = (stutter_mode_t)idx;
         return;
     }
+
+    /* ── Bulk state restore (called by Schwung on boot) ── */
+    if (strcmp(key, "state") == 0) {
+        char sbuf[32];
+        int iv;
+        if (json_get_str(val, "root", sbuf, sizeof(sbuf)) == 0)
+            genera_set_param(inst, "root", sbuf);
+        if (json_get_str(val, "scale", sbuf, sizeof(sbuf)) == 0)
+            genera_set_param(inst, "scale", sbuf);
+        if (json_get_str(val, "gen_mode", sbuf, sizeof(sbuf)) == 0)
+            genera_set_param(inst, "gen_mode", sbuf);
+        if (json_get_int(val, "steps", &iv) == 0) {
+            snprintf(sbuf, sizeof(sbuf), "%d", iv);
+            genera_set_param(inst, "steps", sbuf);
+        }
+        if (json_get_int(val, "capture", &iv) == 0) {
+            snprintf(sbuf, sizeof(sbuf), "%d", iv);
+            genera_set_param(inst, "capture", sbuf);
+        }
+        if (json_get_int(val, "evolve", &iv) == 0) {
+            snprintf(sbuf, sizeof(sbuf), "%d", iv);
+            genera_set_param(inst, "evolve", sbuf);
+        }
+        if (json_get_int(val, "stutter", &iv) == 0) {
+            snprintf(sbuf, sizeof(sbuf), "%d", iv);
+            genera_set_param(inst, "stutter", sbuf);
+        }
+        if (json_get_int(val, "octaves", &iv) == 0) {
+            snprintf(sbuf, sizeof(sbuf), "%d", iv);
+            genera_set_param(inst, "octaves", sbuf);
+        }
+        if (json_get_int(val, "chord", &iv) == 0) {
+            snprintf(sbuf, sizeof(sbuf), "%d", iv);
+            genera_set_param(inst, "chord", sbuf);
+        }
+        if (json_get_str(val, "sync", sbuf, sizeof(sbuf)) == 0)
+            genera_set_param(inst, "sync", sbuf);
+        if (json_get_int(val, "tempo", &iv) == 0) {
+            snprintf(sbuf, sizeof(sbuf), "%d", iv);
+            genera_set_param(inst, "tempo", sbuf);
+        }
+        if (json_get_str(val, "division", sbuf, sizeof(sbuf)) == 0)
+            genera_set_param(inst, "division", sbuf);
+        if (json_get_str(val, "vel_mode", sbuf, sizeof(sbuf)) == 0)
+            genera_set_param(inst, "vel_mode", sbuf);
+        if (json_get_int(val, "velocity", &iv) == 0) {
+            snprintf(sbuf, sizeof(sbuf), "%d", iv);
+            genera_set_param(inst, "velocity", sbuf);
+        }
+        if (json_get_int(val, "gate", &iv) == 0) {
+            snprintf(sbuf, sizeof(sbuf), "%d", iv);
+            genera_set_param(inst, "gate", sbuf);
+        }
+        if (json_get_str(val, "stut_mode", sbuf, sizeof(sbuf)) == 0)
+            genera_set_param(inst, "stut_mode", sbuf);
+        if (json_get_int(val, "humanize", &iv) == 0) {
+            snprintf(sbuf, sizeof(sbuf), "%d", iv);
+            genera_set_param(inst, "humanize", sbuf);
+        }
+        inst->timing_dirty = 1;
+        recalc_clock_timing(inst);
+        return;
+    }
 }
 
 /* ══════════════════════════════════════════════════════════════════════════════

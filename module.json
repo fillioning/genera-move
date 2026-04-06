@@ -3,7 +3,7 @@
   "id": "genera",
   "name": "Genera",
   "abbrev": "GEN",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "builtin": false,
   "description": "Generative note and chord sequencer",
   "author": "Vincent Fillion",
