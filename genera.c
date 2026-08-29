@@ -1366,7 +1366,7 @@ static void build_chain_params(genera_instance_t *inst) {
     appendf(buf, buf_len, &pos,
         "{\"key\":\"chord\",\"name\":\"Chord\",\"type\":\"int\",\"min\":0,\"max\":100,\"step\":1},");
     appendf(buf, buf_len, &pos,
-        "{\"key\":\"gen_mode\",\"name\":\"Gen Mode\",\"type\":\"enum\",\"options\":[\"Up\",\"Down\",\"Up/Down\",\"Down/Up\",\"Exclude\",\"Walk\",\"Random\"]},");
+        "{\"key\":\"gen_mode\",\"short_name\":\"Mode\",\"name\":\"Gen Mode\",\"type\":\"enum\",\"options\":[\"Up\",\"Down\",\"Up/Down\",\"Down/Up\",\"Exclude\",\"Walk\",\"Random\"]},");
     appendf(buf, buf_len, &pos,
         "{\"key\":\"sync\",\"name\":\"Sync\",\"type\":\"enum\",\"options\":[\"Internal\",\"Move\"]},");
     appendf(buf, buf_len, &pos,
@@ -1380,7 +1380,7 @@ static void build_chain_params(genera_instance_t *inst) {
     appendf(buf, buf_len, &pos,
         "{\"key\":\"gate\",\"name\":\"Gate\",\"type\":\"int\",\"min\":1,\"max\":200,\"step\":1},");
     appendf(buf, buf_len, &pos,
-        "{\"key\":\"stut_mode\",\"name\":\"Stut Mode\",\"type\":\"enum\",\"options\":[\"Chaos\",\"Timed\"]},");
+        "{\"key\":\"stut_mode\",\"short_name\":\"Stut\",\"name\":\"Stut Mode\",\"type\":\"enum\",\"options\":[\"Chaos\",\"Timed\"]},");
     appendf(buf, buf_len, &pos,
         "{\"key\":\"humanize\",\"name\":\"Humanize\",\"type\":\"int\",\"min\":0,\"max\":100,\"step\":1}");
     appendf(buf, buf_len, &pos, "]");
